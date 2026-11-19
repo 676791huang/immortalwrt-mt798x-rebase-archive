@@ -1,0 +1,10 @@
+config turboacc 'config'
+	# 关掉 MediaTek HNAT 快路:它会把已建立的流交给 PPE 硬件转发,
+	# CPU 上的 cake/IFB 就看不到这些包,SQM 整形会失效。
+	# 我们 WAN 是 USB(usb0),被 HNAT 当作 external_interface 绑定,
+	# 实测连 usb0 的流都会被接管 —— 所以必须关掉才能用 SQM。
+	# 想恢复硬件加速:把下面改成 mediatek_hnat,并关掉 SQM。
+	option fastpath 'none'
+	option fastpath_mh_bind_rate '30'
+	option fastpath_mh_update_nfct '0'
+	option tcpcca 'bbr'
