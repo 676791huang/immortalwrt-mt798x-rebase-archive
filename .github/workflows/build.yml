@@ -1,0 +1,603 @@
+name: build-openfi6c-25.12
+#
+# OpenFi 6C 固件：chasey-dev/immortalwrt-mt798x-rebase @ 25.12
+#   底座 = ImmortalWrt 25.12 + MTK OpenWrt Feeds（内核 6.12，闭源 mt_wifi 7.6.7.3）
+#
+# ── 缓存五层（GitHub 每仓库总上限 10 GB，按 LRU 淘汰）──────────────────
+#   ① dl/                      ~1.5 GB  源码包，省掉重复下载（最大头是内核 tarball）
+#   ② staging_dir + toolchain  ~2.5 GB  省掉重建交叉工具链（约 40 分钟）★ 最大收益
+#   ③ build_dir/host           ~0.5 GB  省掉重编宿主机工具（约 5~10 分钟）
+#   ④ build_dir/.../linux-*    ~2   GB  省掉每次重编内核（约 8~15 分钟）
+#   ⑤ .ccache                  ~3   GB  编译产物缓存（包越多越值钱）★ 第二大收益
+#
+#   缓存 key 一律带 `ofc25-` 前缀：如果这个 25.12 树和旧的 6.6 树放在
+#   同一个仓库的不同分支里，两边缓存就不会互相污染。
+#
+# ── 关于 key 的选择（踩过坑，别乱改）──────────────────────────────────
+#   staging/host/kernel 的 key 【故意不用】defconfig 的哈希：
+#   工具链只跟「内核版本 / 工具链版本 / feed 列表」有关，跟「选了哪些包」无关。
+#   之前把 defconfig 哈希写进去，结果动一下 defconfig 就缓存全失效、白重建十几分钟。
+#
+# ── OpenFi 自己的包 ──────────────────────────────────────────────────
+#   三个包（散热 / 5G 模组 / 短信）和它们共用的库都在 package/openfi/ 下，
+#   defconfig 里已经选中 —— 也就是说【每次编出来都自带】，不需要额外开关。
+#
+#   为什么不走 feed：
+#     · 少一层"拉取"，就少一处会坏的地方（feed 挂不上、包名撞车、要等 push）
+#     · 改包的时候直接跟着固件一起提交，版本天然一致
+#
+# 成功后在 Releases 里出两个文件：固件本体 + 它的 MD5 文本。
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '编译成功后创建版本发布'
+        type: boolean
+        default: true
+  push:
+    # 我们的开发分支(这个仓库是 fork,不是 main)
+    branches: [openfi-6c]
+    paths:
+      - 'defconfig/**'
+      - 'feeds.conf.default'
+      # ★ 我们自己的包和检查脚本也要能触发构建 ——
+      #   少了这两条,改了包推上去什么都不会发生(以为在编,其实没跑)。
+      - 'package/openfi/**'
+      - 'scripts/openfi/**'
+      - 'target/linux/mediatek/dts/mt7981b-openfi-6c.dts'
+      - 'target/linux/mediatek/image/filogic.mk'
+      # ★ 内核补丁目录 —— 少了这条,改了 hnat / dts 之类的补丁推上去
+      #   什么都不会发生(以为在编,其实没跑)。踩过一次:
+      #   跟进上游 hnat mcast_table 空指针修复(issues/113)时推了补丁,
+      #   等了半天没构建,查 paths 才发现漏了这一条。
+      - 'target/linux/mediatek/patches-6.12/**'
+      # ★ 内核驱动基线源码(files-6.12/)—— 和 patches-6.12/ 是同一类坑。
+      #   mtk_hnat 等驱动直接改在这个目录里,不在 paths 里就等于"改了不编"。
+      #   踩过一次:提交 HNAT 的 18 处内存安全修复,推上去没有任何构建触发。
+      - 'target/linux/mediatek/files-6.12/**'
+      # 板级 base-files(02_network 的 LAN/WAN 与 MAC 规则在这里,
+      # 写错的表现是"刷完没有网络")
+      - 'target/linux/mediatek/filogic/base-files/**'
+      # files/ 覆盖目录(openfi-usbmode 脚本 + init.d + 默认配置)
+      - 'files/**'
+      # 测试
+      - 'tests/**'
+      - '.github/workflows/build.yml'
+  schedule:
+    - cron: '0 18 * * 0'
+
+concurrency:
+  group: build-openfi6c25-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 编译 OpenFi 6C (25.12 / 6.12)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    permissions:
+      contents: write
+
+    steps:
+      - name: 生成版本号（按时间）
+        id: ver
+        run: |
+          TAG="v25.12-openfi6c-$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "版本号: $TAG"
+
+      # 按钮只在 workflow_dispatch 时存在；push / schedule 没有 inputs，
+      # 这里统一成一个明确的 true/false。
+      - name: 决定是否带 LuCI 包
+        id: opt
+        run: |
+
+      - name: 取出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # 编译前先把「板级接线」检查一遍。这些检查一两秒跑完，
+      # 但能挡住「设备名写错 / defconfig 没选设备 / feed 没挂」这类
+      # 会让整个构建白跑 1 小时的低级错误。
+      - name: 自检（板级接线）
+        run: |
+          set -eu
+          fail=0
+          chk() { if [ -e "$1" ]; then echo "OK: $1"; else echo "::error::缺少 $1"; fail=1; fi; }
+          chk defconfig/openfi6c.config
+          chk target/linux/mediatek/dts/mt7981b-openfi-6c.dts
+          chk target/linux/mediatek/image/filogic.mk
+          # ★ 用 musl 编一遍我们的源码。
+          #   glibc 会把 <sys/select.h> 这类头通过别的头间接带进来,musl 不会 ——
+          #   同一份代码本地编得过、目标机上就是硬错误。踩过一次:
+          #   短信包用了 select()/fd_set 却没包含 <sys/select.h>,
+          #   CI 编到第 17 步(67 分钟后)才报 unknown type name 'fd_set'。
+          #   这里 5 秒就能拦住,不用白等一个多小时。
+          # 【必须有超时】上一轮就是这里卡了 28 分钟没动:
+          #   apt-get install 在网络抖动时会一直重试,没有上限。
+          #   timeout 一包上就最多等 90 秒,拿不到就跳过,绝不阻塞构建。
+          if command -v apt-get >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
+            timeout 90 sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 \
+              || timeout 120 sh -c 'sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools' >/dev/null 2>&1 \
+              || echo "::warning::musl-tools 装不上,跳过目标环境编译检查"
+          fi
+          # 这个检查只告警、不阻塞构建 ——
+          # 检查脚本本身也会写错(上次就是它路径写错挡住了构建,
+          # 白白多跑一次)。它发现问题时在日志里喊出来就够了。
+          # ★ 防回归:这个脚本【必须能从任意工作目录调用】。
+          #   踩过两次:它一开始在 scripts/,后来挪到 scripts/openfi/,
+          #   那句按固定层级回退的 cd 就少退了一级,直接报
+          #       cd: can't cd to scripts/openfi
+          #   更坑的是修好之后又被一次「没先读文件就改」的提交覆盖回去(4cc649f),
+          #   而检查本身只 warning、不阻塞,所以没人发现。这里明确拦住。
+          # ★ 要【先去掉注释行】再判断:
+          #   文件里的注释本身就会引用那个坏写法作说明(「不要再写 cd ...」),
+          #   直接 grep 整个文件会误报 —— 第一版就是这么写的,一跑就红。
+          if grep -vE '^[[:space:]]*#' scripts/openfi/check-musl.sh \
+               | grep -q 'dirname "\$0")/\.\.'; then
+            echo "::error::check-musl.sh 又用了按固定层级回退的 cd —— 从别的目录调用会失败"
+            fail=1
+          fi
+          
+          if ! timeout 240 sh scripts/openfi/check-musl.sh; then
+            echo "::warning::musl 编译检查没跑完(超时或有问题)—— 看上面的输出"
+          fi
+
+          # files/ 覆盖目录里的脚本:语法 + 纯逻辑回归。
+          # usbmode 管的是 5G 模组的 USB 数据模式(也就是 WAN 怎么出来),
+          # 坏了的表现是"模组认到了但上不了网",上机才发现,所以在这里先拦。
+          for f in files/usr/sbin/openfi-usbmode files/etc/init.d/openfi-usbmode; do
+            [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
+            sh -n "$f" || { echo "::error::$f 语法错误"; fail=1; }
+            [ "$(stat -c '%a' "$f")" = "755" ] \
+              || { echo "::error::$f 权限不是 755(固件里会执行不了)"; fail=1; }
+          done
+          [ -x tests/test-usbmode.sh ] && { sh tests/test-usbmode.sh || fail=1; }
+          # 短信命令行的回归测试。
+          # 起因是网页「短信」一直转圈:list/read/unread/delete 只读本地存储,
+          # 却无条件去解析串口,在采样进程的锁上最长等 72 秒。
+          # 这个测试【真的把程序跑起来并计时】,再变回去就会当场超时。
+          [ -x tests/test-sms-cli.sh ] && { sh tests/test-sms-cli.sh || fail=1; }
+          # ★ 跨包一致性检查。这类 bug 已经咬过三次,而且都能过编译、过单元测试,
+          #   直到上机点开页面才炸:改配置名时漏改同一文件里的 form.Map、
+          #   漏改另一个包的 ACL、ACL 与菜单 depends 对不上……
+          #   这个脚本机器核对:JS 的 uci 引用 / ACL 的 uci 权限 / uci-defaults
+          #   建的配置文件 / C 代码的包名,四者必须指向同一个配置。
+          [ -x scripts/openfi/check-consistency.sh ] && { sh scripts/openfi/check-consistency.sh || fail=1; }
+          # ★ apk 换源脚本:真跑一遍(造个假源列表,看它换对没有)。
+          #   这个脚本首次开机执行,写坏了设备就没法装包,所以要测。
+          if [ -f files/etc/uci-defaults/95-openfi-apk-mirror ]; then
+            T=$(mktemp -d)
+            cat > "$T/distfeeds.list" <<'EOFLIST'
+          https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base
+          https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/video
+          https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/mediatek/filogic/packages
+          EOFLIST
+            OPENFI_APK_DIR="$T" sh files/etc/uci-defaults/95-openfi-apk-mirror >/dev/null 2>&1
+            grep -q 'mirror.nju.edu.cn' "$T/distfeeds.list" \
+              || { echo '::error::换源脚本没有把官方域名换成南大'; fail=1; }
+            grep -q '^https://downloads.immortalwrt.org' "$T/distfeeds.list" \
+              && { echo '::error::换源后还残留官方域名'; fail=1; } || true
+            grep -q '^#.*video' "$T/distfeeds.list" \
+              || { echo '::error::会 404 的 video 源没被注释掉'; fail=1; }
+            grep -q 'targets/mediatek/filogic' "$T/distfeeds.list" \
+              || { echo '::error::板级源被误删了'; fail=1; }
+            [ -f "$T/distfeeds.list.orig" ] \
+              || { echo '::error::没有备份原文件'; fail=1; }
+            # 幂等:再跑一次不应该有变化
+            BEFORE=$(cat "$T/distfeeds.list")
+            OPENFI_APK_DIR="$T" sh files/etc/uci-defaults/95-openfi-apk-mirror >/dev/null 2>&1
+            [ "$BEFORE" = "$(cat "$T/distfeeds.list")" ] \
+              || { echo '::error::换源脚本不是幂等的'; fail=1; }
+            rm -rf "$T"
+          fi
+
+          chk feeds.conf.default
+
+          echo "----- defconfig 里选的是我们的设备吗 -----"
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=y' defconfig/openfi6c.config \
+            || { echo "::error::defconfig 没选 openfi_6c"; fail=1; }
+
+          echo "----- defconfig 不该再带 MULTI_PROFILE -----"
+          grep -q '^CONFIG_TARGET_MULTI_PROFILE=y' defconfig/openfi6c.config \
+            && { echo "::error::defconfig 里还有 MULTI_PROFILE，会连别的板子一起编"; fail=1; } || true
+
+          echo "----- 设备定义在不在、关键项齐不齐 -----"
+          for k in 'define Device/openfi_6c' 'DEVICE_DTS := mt7981b-openfi-6c' \
+                   'SUPPORTED_DEVICES += openfi,6c' 'kmod-usb-net-cdc-ncm' 'kmod-usb-net-rndis'; do
+            grep -q "$k" target/linux/mediatek/image/filogic.mk \
+              || { echo "::error::filogic.mk 里缺少: $k"; fail=1; }
+          done
+
+          echo "----- 我们自己的包在不在树里、能不能被扫到 -----"
+          # feed 扫描器靠 Makefile 里的 call BuildPackage 建索引；
+          # ★ Makefile 里不能用 C 风格的 /* */ 注释。
+          #   make 解析会直接失败，而 OpenWrt 的包扫描器(scan.mk)对
+          #   解析失败的 Makefile 是【静默跳过】的 —— 于是这个包在索引里
+          #   根本不存在，构建到一半才报"依赖 xxx 不存在"，
+          #   错误信息指向依赖、不指向那个坏掉的 Makefile，很难查。
+          #   （这个坑我真踩过：openfi-lib 就这样被跳过，整次构建白跑。）
+          for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+            f="package/openfi/$p/Makefile"
+            [ -e "$f" ] || continue
+            grep -qE '^[[:space:]]*/\*|^[[:space:]]*\*/' "$f" \
+              && { echo "::error::$f 里有 C 风格注释，make 解析会失败"; fail=1; }
+          done
+
+          # 少了那行包会变成未知配置项，被 make defconfig 悄悄丢掉。
+          for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+            f="package/openfi/$p/Makefile"
+            [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
+            grep -q 'call BuildPackage' "$f" \
+              || { echo "::error::$f 里没有 call BuildPackage，扫描器看不见它"; fail=1; }
+          done
+
+          echo "----- dts 引用的节点（这些必须由 dtsi 或 MTK patch 提供）-----"
+          for n in eth spi0 pio pwm uart0 usb_phy xhci wifi watchdog; do
+            grep -q "^&$n {" target/linux/mediatek/dts/mt7981b-openfi-6c.dts \
+              || echo "::warning::dts 里没有 &$n 覆盖块（可能是有意省略）"
+          done
+
+          echo "----- 灯名核对（01_leds 引用的灯，DTS 里真的定义了吗）-----"
+          # 上游给 openfi,6c 写的那段是从别的板子抄来的（引用 green:lan 和 eth0，
+          # 本板都没有）。灯名写错时内核【不报错】，只是灯不亮 —— 上机才发现。
+          # 所以在这里拦住：名字对不上就别往下编了。
+          python3 scripts/openfi/check-leds.py \
+            || { echo "::error::LED 名字对不上，编出来灯不会亮"; fail=1; }
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "✅ 板级接线自检通过"
+
+      - name: 释放磁盘空间
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /opt/google/chrome /usr/share/swift "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          timeout 60 sudo apt-get clean || true
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          # 【必须有超时】apt 联网时网络一抖就会无限重试。
+          # 上一轮 step 5 的自检就是这么卡了 28 分钟;这一步包更多、更慢,
+          # 同样的坑。两次都包上 timeout,还不行就明确报错(编译本来也需要这些包)。
+          PKGS="build-essential clang flex bison g++ gawk gcc-multilib g++-multilib
+                gettext git libncurses-dev libssl-dev libelf-dev zlib1g-dev
+                python3 python3-dev python3-setuptools python3-pyelftools python3-ply
+                rsync unzip file wget curl ca-certificates subversion swig cmake
+                ninja-build autoconf automake libtool pkgconf ccache help2man patch
+                time xsltproc zstd liblz4-tool libzstd-dev device-tree-compiler lua5.1"
+          timeout 300 sudo apt-get update -qq || echo "::warning::apt update 超时"
+          timeout 600 sudo apt-get install -y -qq $PKGS \
+            || { echo "第一次装依赖超时/失败,重试一次"; timeout 900 sudo apt-get install -y -qq $PKGS; }
+          echo "----- 编译依赖自检 -----"
+          for t in gcc g++ make python3 unzip rsync dtc timeout; do
+            command -v "$t" >/dev/null 2>&1 && echo "  ✅ $t" || { echo "::error::缺少 $t"; exit 1; }
+          done
+
+      # ---------------- 编译缓存（五层）----------------
+      - name: ① 缓存 dl/（源码包）
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: ofc25-dl-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            ofc25-dl-
+
+      - name: ② 缓存 staging_dir + toolchain（省掉重建工具链 ~40 分钟）
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            staging_dir
+            toolchain
+          key: ofc25-stage-${{ runner.arch }}-${{ hashFiles('include/kernel-version.mk', 'feeds.conf.default', 'toolchain/gcc/Config.version') }}
+          restore-keys: |
+            ofc25-stage-${{ runner.arch }}-
+
+      - name: ③ 缓存 build_dir/host（省掉重编宿主机工具 ~5-10 分钟）
+        uses: actions/cache/restore@v4
+        with:
+          path: build_dir/host
+          key: ofc25-host-${{ runner.arch }}-${{ hashFiles('include/kernel-version.mk', 'feeds.conf.default', 'toolchain/gcc/Config.version') }}
+          restore-keys: |
+            ofc25-host-${{ runner.arch }}-
+
+      - name: ④ 缓存内核编译目录（省掉每次重编内核 ~8-15 分钟）
+        uses: actions/cache/restore@v4
+        with:
+          path: build_dir/target-*/linux-mediatek_filogic
+          # key 里带 kernel-version.mk：内核版本一变自动失效，不会拿到错的内核
+          key: ofc25-kern-${{ runner.arch }}-${{ hashFiles('include/kernel-version.mk', 'target/linux/mediatek/Makefile', 'target/linux/mediatek/filogic/config-6.12') }}
+          restore-keys: |
+            ofc25-kern-${{ runner.arch }}-
+
+      - name: ccache 配置
+        run: |
+          # OpenWrt 的 rules.mk 会用 CONFIG_CCACHE_DIR（默认 $(TOPDIR)/.ccache）覆盖环境变量，
+          # 所以缓存路径是仓库根下的 .ccache。前提是 .config 里有 CONFIG_CCACHE=y。
+          echo "CCACHE_COMPILERCHECK=content" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=3G" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" >> $GITHUB_ENV
+          # 【提速】每次 CI 都是全新 clone 的文件，mtime/ctime 全变了，
+          # ccache 默认会因为这些时间戳把缓存判为失效 —— 白丢命中率。
+          echo "CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime,file_stat_matches" >> $GITHUB_ENV
+          # 压缩后同样 3G 能装下更多条目
+          echo "CCACHE_COMPRESS=true" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESSLEVEL=6" >> $GITHUB_ENV
+          mkdir -p .ccache
+
+      - name: ⑤ 恢复 ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ofc25-cc-${{ github.sha }}
+          restore-keys: |
+            ofc25-cc-
+
+      # ---------------- 构建 ----------------
+      - name: 更新并安装 feeds
+        id: feeds
+        run: |
+          # feeds 要从 5 个 git 仓库拉代码,同样不能没有上限
+          timeout 600 ./scripts/feeds update -a || { echo "::error::feeds 更新超时(git 仓库拉不下来)"; exit 1; }
+          timeout 600 ./scripts/feeds install -a || { echo "::error::feeds 安装超时"; exit 1; }
+          # 我们自己的包在树里（package/openfi/），跟着固件仓库一起版本化，
+          # 所以"包版本"就是当前这次提交 —— 发布说明里带上它，方便回查。
+          C=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
+          echo "pkg_commit=$C" >> "$GITHUB_OUTPUT"
+          echo "----- 树内包（package/openfi/）-----"
+          ls package/openfi/ 2>/dev/null || true
+
+      - name: 应用配置
+        run: |
+          cp defconfig/openfi6c.config .config
+          # 三个包的 CONFIG 已经写在 defconfig 里了，这里不用再追加
+          make defconfig
+
+          echo "----- 关键配置确认 -----"
+          grep -E 'CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=|CONFIG_PACKAGE_kmod-mt_wifi=|CONFIG_MTK_MT_WIFI_DRIVER_VERSION_|CONFIG_PACKAGE_mtwifi-cfg-ucode=|CONFIG_PACKAGE_iwinfo-ucode=' .config || true
+
+          echo "----- 断言设备选中 -----"
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=y' .config \
+            || { echo "::error::openfi_6c 没进 .config"; exit 1; }
+          echo "OK: 设备 = openfi_6c"
+
+          echo "----- 断言闭源 WiFi 驱动选的是 7673 -----"
+          grep -q '^CONFIG_MTK_MT_WIFI_DRIVER_VERSION_7673=y' .config \
+            || { echo "::warning::WiFi 驱动版本不是 7673，确认一下是不是有意的"; }
+          grep -q '^CONFIG_PACKAGE_kmod-mt_wifi=y' .config \
+            || { echo "::error::kmod-mt_wifi 没进 .config —— 闭源 WiFi 驱动没选上"; exit 1; }
+          echo "OK: 闭源 mt_wifi 驱动"
+
+          echo "----- 断言 ccache 真的开了 -----"
+          grep -q '^CONFIG_CCACHE=y' .config \
+            || { echo "::error::CONFIG_CCACHE 没生效，缓存形同虚设"; exit 1; }
+          echo "OK: CONFIG_CCACHE=y"
+
+          echo "----- 断言 initramfs 没被打开（否则白编一整套内核+rootfs）-----"
+          grep -q '^CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config \
+            && { echo "::error::initramfs 被打开了 —— 我们只发 sysupgrade，不需要它"; exit 1; } || true
+          echo "OK: initramfs 已关闭"
+
+          echo "----- 断言我们自己的三个包真的被选中 -----"
+          # 包在 package/openfi/ 下，走树内编译。进不了 .config 就说明
+          # 包 Makefile 有问题（少了 call BuildPackage）或 defconfig 没写对。
+          for s in luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+            grep -q "^CONFIG_PACKAGE_${s}=y" .config \
+              || { echo "::error::${s} 没进 .config"; exit 1; }
+            echo "OK: ${s}=y"
+          done
+          grep -q "^CONFIG_PACKAGE_openfi-lib=" .config \
+            || { echo "::error::openfi-lib 没被依赖带进来"; exit 1; }
+          echo "OK: openfi-lib（被 DEPENDS 自动带进来）"
+
+          echo "----- 提醒：USB 数据通道驱动是写在 filogic.mk 的 DEVICE_PACKAGES 里的 -----"
+          echo "      （不经过 .config，所以这里看不到；编完用下面的 manifest 断言检查）"
+
+      - name: 下载源码包
+        run: |
+          # 这一步要下 ~1 GB 源码包,网络慢是常态 —— 给足 30 分钟,
+          # 但【不能没有上限】,否则像 apt 那样卡到天荒地老。
+          timeout 1800 make download -j"$(nproc)" \
+            || { echo "并行下载超时,改成串行再试一次(串行更容易看出是哪个包卡住)";
+                 timeout 1800 make download -j1 V=s; }
+
+      - name: 编译
+        id: compile
+        run: |
+          set -o pipefail
+          # 【提速】+1 是为了让 CPU 在等 I/O（下载/解包/configure）时不被空着。
+          # GitHub 标准 runner 是 4 核 16GB，-j5 不会 OOM。
+          # 给个宽上限:冷构建实测约 60~70 分钟,3 小时足够;
+          # 但没有上限的话,万一卡在某个下载/configure 上会一直挂着。
+          time timeout 10800 make -j"$(($(nproc) + 1))" 2>&1 | tee /tmp/build.log
+
+      - name: 编译失败诊断
+        if: failure() && steps.compile.outcome == 'failure'
+        run: |
+          echo "===================== 错误行 ====================="
+          grep -nE '(Error [0-9]+|error:|ERROR:|undefined reference|No rule to make target|fatal error|Hunk #.*FAILED|patch.*failed|Duplicate label|syntax error)' \
+            /tmp/build.log | tail -n 60 || true
+          echo ""
+          echo "===================== 日志最后 200 行 ====================="
+          tail -n 200 /tmp/build.log || true
+
+      # DEVICE_PACKAGES 不进 .config，所以只能在编完后从镜像清单里核对。
+      # 这是唯一能证明「USB 驱动真的进了固件」的地方 —— 5G 模组能不能用就看它。
+      - name: 断言镜像里真的带上了 USB 驱动（DEVICE_PACKAGES）
+        if: success()
+        run: |
+          set -eu
+          M=$(find bin/targets/mediatek/filogic -maxdepth 1 -name '*.manifest' | head -1)
+          [ -n "$M" ] || { echo "::error::找不到 manifest"; ls -la bin/targets/mediatek/filogic/ || true; exit 1; }
+          echo "----- manifest: $M -----"
+          fail=0
+          for p in kmod-usb3 kmod-usb-net-cdc-ncm kmod-usb-net-rndis kmod-usb-net-cdc-ether \
+                   kmod-usb-serial-option kmod-usb-storage; do
+            if grep -q "^$p " "$M"; then echo "OK: $p"; else echo "::error::镜像里没有 $p —— 5G 模组的数据通道会缺驱动"; fail=1; fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: ccache 命中统计
+        if: always()
+        run: |
+          staging_dir/host/bin/ccache -s 2>/dev/null || ccache -s 2>/dev/null || echo "（首次构建，ccache 还没生成）"
+          du -sh .ccache dl staging_dir build_dir/host 2>/dev/null || true
+
+      # ---- 四层缓存的保存：必须在编译【之后】，且 if: always() ----
+      #
+      # 【为什么不用 actions/cache@v4 一步到位】
+      #   它把保存放在 job 结束时,而【只有 job 成功才写缓存】。
+      #   于是编译失败 → 工具链那 40 分钟白编,下一轮还从零开始。
+      #   前几轮我们失败过好几次,这四层缓存【一次都没存下来】,
+      #   每轮都是冷构建 60~90 分钟 —— 这才是真正烧时间的地方。
+      #   (ccache 那层早就是这个写法,注释也写明了原因,只是没推广到另外四层。)
+      #
+      # 先存大的(staging_dir 约 1.5 GB),这样失败时大件也先落袋。
+      # 缓存上限 10 GB/仓库,超了按最后访问时间淘汰 ——
+      # 所以只存 staging_dir,不把整个 build_dir 塞进去。
+      - name: ①-存 dl/（源码包）
+        # 【不能写 always()】always() 把"被取消"也算进去 ——
+        # 取消时编译可能跑了一半,staging_dir 里会留下 .built 标记,
+        # 下次构建以为组件已经编好,拿到残缺的工具链,报一堆莫名其妙的错。
+        #   success() || failure() = 只要不是"被取消"就跑:
+        #   编译失败照样存(这是我们要的),取消则不存。
+        if: success() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: ofc25-dl-${{ hashFiles('feeds.conf.default') }}
+
+      - name: ②-存 staging_dir + toolchain（下次省掉重建工具链 ~40 分钟）
+        # 【不能写 always()】always() 把"被取消"也算进去 ——
+        # 取消时编译可能跑了一半,staging_dir 里会留下 .built 标记,
+        # 下次构建以为组件已经编好,拿到残缺的工具链,报一堆莫名其妙的错。
+        #   success() || failure() = 只要不是"被取消"就跑:
+        #   编译失败照样存(这是我们要的),取消则不存。
+        if: success() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            staging_dir
+            toolchain
+          key: ofc25-stage-${{ runner.arch }}-${{ hashFiles('include/kernel-version.mk', 'feeds.conf.default', 'toolchain/gcc/Config.version') }}
+
+      - name: ③-存 build_dir/host（下次省掉重编宿主机工具 ~5-10 分钟）
+        # 【不能写 always()】always() 把"被取消"也算进去 ——
+        # 取消时编译可能跑了一半,staging_dir 里会留下 .built 标记,
+        # 下次构建以为组件已经编好,拿到残缺的工具链,报一堆莫名其妙的错。
+        #   success() || failure() = 只要不是"被取消"就跑:
+        #   编译失败照样存(这是我们要的),取消则不存。
+        if: success() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: build_dir/host
+          key: ofc25-host-${{ runner.arch }}-${{ hashFiles('include/kernel-version.mk', 'feeds.conf.default', 'toolchain/gcc/Config.version') }}
+
+      - name: ④-存内核编译目录（下次省掉重编内核 ~8-15 分钟）
+        # 【不能写 always()】always() 把"被取消"也算进去 ——
+        # 取消时编译可能跑了一半,staging_dir 里会留下 .built 标记,
+        # 下次构建以为组件已经编好,拿到残缺的工具链,报一堆莫名其妙的错。
+        #   success() || failure() = 只要不是"被取消"就跑:
+        #   编译失败照样存(这是我们要的),取消则不存。
+        if: success() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: build_dir/target-*/linux-mediatek_filogic
+          key: ofc25-kern-${{ runner.arch }}-${{ hashFiles('include/kernel-version.mk', 'target/linux/mediatek/Makefile', 'target/linux/mediatek/filogic/config-6.12') }}
+
+      - name: 保存 ccache（即使编译失败也存）
+        # 【提速关键】默认的 actions/cache 只在 job 成功时才写缓存，
+        # 于是编译失败那一轮编的东西全白编了（而失败往往就发生在最后几个包）。
+        # 用 restore/save 分开 + if: always()，失败的轮次也能把 ccache 留给下次。
+        # 【不能写 always()】always() 把"被取消"也算进去 ——
+        # 取消时编译可能跑了一半,staging_dir 里会留下 .built 标记,
+        # 下次构建以为组件已经编好,拿到残缺的工具链,报一堆莫名其妙的错。
+        #   success() || failure() = 只要不是"被取消"就跑:
+        #   编译失败照样存(这是我们要的),取消则不存。
+        if: success() || failure()
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ofc25-cc-${{ github.sha }}
+
+      - name: 收集产物 + 生成 MD5
+        if: success()
+        run: |
+          set -eu
+          mkdir -p out
+          FW=$(find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*openfi_6c*sysupgrade.bin' | head -1)
+          [ -n "$FW" ] || { echo "::error::没找到 sysupgrade 固件"; ls -la bin/targets/mediatek/filogic/ || true; exit 1; }
+          cp "$FW" out/
+          B=$(basename "$FW")
+          ( cd out && md5sum "$B" > "$B.md5.txt" )
+          echo "----- 产物 -----"
+          ls -lh out/
+          echo "----- MD5 -----"
+          cat out/*.md5.txt
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.ver.outputs.tag }}
+          path: /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 上传固件
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openfi6c-${{ steps.ver.outputs.tag }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 创建版本发布（固件 + MD5 两个文件）
+        if: success() && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish == 'true')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${{ steps.ver.outputs.tag }}"
+          if timeout 60 gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            TAG="${TAG}-$(git rev-parse --short HEAD)"
+          fi
+          FWNAME=$(cd out && ls | grep sysupgrade | head -1)
+          PKG_ROW='**已内置** `luci-app-openfi-fan`（散热）+ `luci-app-openfi-modem`（5G 模组）+ `luci-app-openfi-sms`（短信），源码在 `package/openfi/`'
+          FAN_ROW='由 `luci-app-openfi-fan` 管理：四点温度曲线 + 迟滞 + 静默档 + 过热兜底' 
+          cat > /tmp/notes.md <<NOTES
+          ## OpenFi 6C 固件 $TAG
+
+          | 项目 | 值 |
+          |---|---|
+          | 底座 | \`chasey-dev/immortalwrt-mt798x-rebase\` @ \`25.12\`（内核 6.12） |
+          | WiFi | 联发科闭源 \`mt_wifi\` **7.6.7.3**（41 个补丁）+ HNAT |
+          | WAN | USB 模组（NCM 优先 → \`wwan0\`，失败退回 RNDIS → \`usb0\`），模组自己拨号 |
+          | 风扇/LED | $FAN_ROW |
+          | LuCI 包 | $PKG_ROW |
+
+          ### 刷机
+
+          \`\`\`sh
+          sysupgrade -n /tmp/$FWNAME
+          \`\`\`
+
+          - 默认 LAN **\`192.168.6.1\`**（不是原厂的 192.168.21.1，也不是常见的 192.168.1.1）
+          - root 无密码；WiFi 默认不加密（首次启动自动生成）
+          - 从原厂固件刷入时**不要保留配置**
+
+          ### 附件
+
+          1. \`$FWNAME\` —— 固件本体
+          2. \`$FWNAME.md5.txt\` —— 它的 MD5
+          NOTES
+          gh release create "$TAG" out/* \
+            --title "OpenFi 6C $TAG" \
+            --notes-file /tmp/notes.md \
+            --repo "$GITHUB_REPOSITORY"
+          echo "✅ Release: $TAG"
