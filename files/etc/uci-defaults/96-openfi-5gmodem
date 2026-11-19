@@ -1,0 +1,11 @@
+#!/bin/sh
+# 5gmodem 完整版接管 5G 面板。
+# 灯的接法已经在 board.d/01_leds 里定好了(wwan0 的 netdev 触发)，
+# 这里把 5gmodem 自己的灯控关掉，避免两套东西同时写同一批 LED。
+[ -x /usr/share/5gmodem/modemswitch.sh ] || exit 0
+
+uci -q get 5gmodem.@5gmodem[0] >/dev/null || uci -q set 5gmodem.@5gmodem[0]=5gmodem
+uci -q set 5gmodem.@5gmodem[0].signal_leds='0'
+uci -q set 5gmodem.@5gmodem[0].auto_port='1'
+uci -q commit 5gmodem 2>/dev/null
+exit 0

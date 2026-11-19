@@ -22,7 +22,7 @@ echo "到   $DST"
 echo
 
 mkdir -p "$DST"
-for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+for p in openfi-lib luci-app-openfi-fan; do
 	[ -d "$SRC/$p" ] || { echo "  跳过 $p（不存在）"; continue; }
 	# ★ 变量必须非空才允许 rm -rf —— 万一 DST 或 p 空掉,
 	#   "rm -rf /$p" 就是删根目录。shellcheck 的 SC2115 指的就是这个。

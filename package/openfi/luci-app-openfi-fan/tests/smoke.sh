@@ -39,7 +39,8 @@ for ch in 0 1; do
 	for a in period duty_cycle enable; do : > "$R/sys/class/pwm/pwmchip0/pwm$ch/$a"; done
 done
 echo 52000 > "$R/sys/class/thermal/thermal_zone0/temp"
-echo 44    > "$R/var/run/openfi-modem-temp"
+mkdir -p "$R/tmp/5gmodem"
+echo '{"sig":67,"temp":44}' > "$R/tmp/5gmodem/tele.json"
 cat > "$R/etc/config/openfi_fan" <<'EOF'
 config fan 'fan'
 	option period '5'

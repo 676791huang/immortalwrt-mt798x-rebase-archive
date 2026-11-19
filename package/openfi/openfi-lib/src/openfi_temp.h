@@ -3,7 +3,7 @@
  * 三个来源(和原版 op_fan.sh 一致):
  *   CPU    /sys/class/thermal/thermal_zone0/temp      毫摄氏度
  *   WiFi   闭源 MTK 驱动用 iwpriv <iface> stat 暴露 CurrentTemperature
- *   模组   由模组采样进程(luci-app-openfi-modem)每轮写一个整数进文件
+ *   模组   读 5gmodem 的遥测 /tmp/5gmodem/tele.json(取其中的 temp 字段)
  *          —— 走文件而不是自己开 AT 口,省一路串口轮询,也不会跟信号采样抢口
  *
  * 【可测性】解析是纯函数:

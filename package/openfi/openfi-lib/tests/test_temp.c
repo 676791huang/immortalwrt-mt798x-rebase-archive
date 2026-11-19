@@ -81,18 +81,18 @@ int main(void)
 	temp_cfg_default(&cfg);
 	T_EQ_STR(cfg.cpu_path, "/sys/class/thermal/thermal_zone0/temp");
 	T_EQ_STR(cfg.wifi_iface, "ra0");
-	T_EQ_STR(cfg.modem_file, "/var/run/openfi-modem-temp");
+	T_EQ_STR(cfg.modem_file, "/tmp/5gmodem/tele.json");
 	T_EQ_INT(cfg.wifi_enabled, 1);
 
 	printf("── 三路采集 + 统一温度(取最高)──\n");
 	mkdir(ROOT, 0755);
 	osys_set_root(ROOT);
 	mkfile("sys/class/thermal/thermal_zone0/temp", "52000\n");
-	mkfile("var/run/openfi-modem-temp", "47\n");
+	mkfile("tmp/5gmodem/tele.json", "{\"temp\":47}\n");
 	cfg.wifi_enabled = 0;                    /* 本地没法跑 iwpriv */
 	snprintf(cfg.cpu_path, sizeof(cfg.cpu_path),
 		 "/sys/class/thermal/thermal_zone0/temp");
-	snprintf(cfg.modem_file, sizeof(cfg.modem_file), "/var/run/openfi-modem-temp");
+	snprintf(cfg.modem_file, sizeof(cfg.modem_file), "/tmp/5gmodem/tele.json");
 
 	T_EQ_INT(temp_read(TEMP_CPU, &cfg), 52);
 	T_EQ_INT(temp_read(TEMP_MODEM, &cfg), 47);
@@ -106,7 +106,7 @@ int main(void)
 
 	printf("── 温度下降后统一温度跟着变 ──\n");
 	mkfile("sys/class/thermal/thermal_zone0/temp", "44000\n");
-	mkfile("var/run/openfi-modem-temp", "51\n");
+	mkfile("tmp/5gmodem/tele.json", "{\"temp\":51}\n");
 	T_EQ_INT(temp_read_all(&cfg, out3, &unified), 2);
 	T_EQ_INT(unified, 51);                                /* 这次是模组最高 */
 

@@ -53,8 +53,6 @@ fi
 cd "$P" || exit 1
 
 L=openfi-lib/src
-M=luci-app-openfi-modem/src
-S=luci-app-openfi-sms/src
 CF="-O2 -Wall -Wextra -Wpedantic -Wshadow -Werror -std=gnu99"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -74,7 +72,7 @@ for h in $L/*.h; do [ -f "$h" ] && cp "$h" "$WORK/lib/"; done
 ) || { echo "     ❌ openfi-lib 编译失败"; exit 1; }
 echo "     ✅ openfi-lib"
 
-echo "  ② 三个程序:编译 + 链接"
+echo "  ② 剩下的程序:编译 + 链接"
 
 build_one() {
 	pkg="$1"; bin="$2"; shift 2
@@ -97,8 +95,6 @@ build_one() {
 }
 
 build_one luci-app-openfi-fan   openfi-fan   "-I$L"
-build_one luci-app-openfi-modem openfi-modem "-I$L" "-I$M"
-build_one luci-app-openfi-sms   openfi-sms   "-I$L" "-I$S"
 
 echo
 if [ "$bad" -eq 0 ]; then
