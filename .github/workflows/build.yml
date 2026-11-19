@@ -408,7 +408,7 @@ jobs:
             && { echo "::error::initramfs 被打开了 —— 我们只发 sysupgrade，不需要它"; exit 1; } || true
           echo "OK: initramfs 已关闭"
 
-          for s in luci-app-openfi-fan luci-app-5gmodem luci-proto-mbim modemmanager; do
+          for s in luci-app-openfi-fan luci-app-5gmodem luci-proto-mbim modemmanager kmod-sched-cake sqm-scripts; do
             grep -q "^CONFIG_PACKAGE_${s}=y" .config \
               || { echo "::error::${s} 没进 .config"; exit 1; }
             echo "OK: ${s}=y"

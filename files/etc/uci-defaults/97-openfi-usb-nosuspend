@@ -1,0 +1,8 @@
+#!/bin/sh
+# 模组挂在 USB 上,autosuspend=2s 会让空闲后第一个包多等几百毫秒;
+# 这里关掉自动挂起,让 5G 链路随时就绪。
+echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null
+for d in /sys/bus/usb/devices/*/power/control; do
+	[ -e "$d" ] && echo on > "$d" 2>/dev/null
+done
+exit 0
