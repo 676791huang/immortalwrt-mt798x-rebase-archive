@@ -27,9 +27,14 @@ name: sync-upstream
 #
 
 on:
-  schedule:
-    # UTC 20:00 = 北京时间 04:00
-    - cron: '0 20 * * *'
+  # ⚠️ 这个工作流是给旧的 fork 布局写的（纯上游 25.12 分支 + openfi-6c 开发分支）。
+  # 现在仓库改成「单条主线的 main（无历史快照）」之后，这里的分支名和"开 PR 合进
+  # openfi-6c"的逻辑都不成立了，定时跑只会每天挂一次。
+  # 所以先把定时摘掉，只保留手动触发；等按新布局重写回来再加回 cron：
+  #
+  #   schedule:
+  #     - cron: '0 20 * * *'   # UTC 20:00 = 北京时间 04:00
+  #
   workflow_dispatch:
     inputs:
       upstream_branch:
