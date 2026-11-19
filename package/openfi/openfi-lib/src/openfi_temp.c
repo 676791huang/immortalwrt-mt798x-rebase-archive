@@ -16,7 +16,7 @@ void temp_cfg_default(struct temp_cfg *c)
 		 "/sys/class/thermal/thermal_zone0/temp");
 	snprintf(c->wifi_iface, sizeof(c->wifi_iface), "ra0");
 	snprintf(c->modem_file, sizeof(c->modem_file),
-		 "/var/run/openfi-modem-temp");
+		 "/tmp/5gmodem/tele.json");
 	c->wifi_enabled = 1;
 }
 
@@ -106,6 +106,30 @@ static char *run_capture(const char *cmd)
 	return strdup(buf);
 }
 
+/*
+ * 模组温度现在的来源是 5gmodem 的遥测文件(/tmp/5gmodem/tele.json):
+ *   {"sig":67,"oper":"T-Mobile",...,"temp":34,...}
+ * 兼容老格式(纯数字一行),两种都能读。
+ */
+int temp_parse_tele(const char *s)
+{
+	const char *p;
+
+	if (!s)
+		return TEMP_INVALID;
+	p = strstr(s, "\"temp\"");
+	if (p) {
+		p += strlen("\"temp\"");
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == ':') {
+			p++;
+			return temp_parse_celsius(p);
+		}
+	}
+	return temp_parse_celsius(s);
+}
+
 int temp_read(enum temp_src src, const struct temp_cfg *cfg)
 {
 	char *v, cmd[256];
@@ -138,7 +162,7 @@ int temp_read(enum temp_src src, const struct temp_cfg *cfg)
 		v = osys_read(cfg->modem_file);
 		if (!v)
 			return TEMP_INVALID;
-		r = temp_parse_celsius(v);
+		r = temp_parse_tele(v);
 		free(v);
 		return r;
 

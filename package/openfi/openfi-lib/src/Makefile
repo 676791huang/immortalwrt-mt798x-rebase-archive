@@ -16,7 +16,7 @@ CFLAGS  ?= -O2 -Wall -Wextra -std=gnu99
 JSON_CFLAGS ?= $(shell pkg-config --cflags json-c 2>/dev/null)
 LDFLAGS ?=
 
-SRCS := openfi_uci.c openfi_json.c openfi_log.c openfi_sysfs.c openfi_at.c openfi_at_io.c openfi_curve.c openfi_fanctl.c openfi_led.c openfi_temp.c openfi_switch.c
+SRCS := openfi_uci.c openfi_json.c openfi_log.c openfi_sysfs.c openfi_curve.c openfi_fanctl.c openfi_led.c openfi_temp.c openfi_switch.c
 OBJS := $(SRCS:.c=.o)
 LIB  := libopenfi.a
 

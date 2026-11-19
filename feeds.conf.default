@@ -7,3 +7,5 @@ src-git video https://github.com/openwrt/video.git;openwrt-25.12
 # OpenFi 6C 自己的包不再走 feed —— 直接放在 package/openfi/ 下。
 # 这样少一层"拉取",也就少一处会坏的地方(改包不用等 push,也不会有
 # 两个同名包互相覆盖的问题)。defconfig 里选上那几个 CONFIG_PACKAGE 即可。
+# 5G 模组全功能面板（钉 v4.0.9；仓库根目录下是 luci-app-5gmodem/）
+src-git 5gmodem https://github.com/fildunsky/luci-app-5gmodem.git;v4.0.9

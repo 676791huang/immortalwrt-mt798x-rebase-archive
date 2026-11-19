@@ -210,17 +210,14 @@ jobs:
             echo "::warning::musl 编译检查没跑完(超时或有问题) —— 看上面的输出"
           fi
 
-          # files/ 覆盖目录里的脚本：语法 + 权限（固件里执行不了就白编）
-          for f in files/usr/sbin/openfi-usbmode files/etc/init.d/openfi-usbmode; do
-            [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
-            sh -n "$f" || { echo "::error::$f 语法错误"; fail=1; }
-            [ "$(stat -c '%a' "$f")" = "755" ] \
-              || { echo "::error::$f 权限不是 755(固件里会执行不了)"; fail=1; }
+          # 5G 面板已交给 feed 里的 luci-app-5gmodem（完整版），我们自己的
+          # 模组/短信包和 usbmode 脚本已删；这里只防呆，防止它们又被加回来。
+          for p in luci-app-openfi-fan openfi-lib; do
+            [ -d "package/openfi/$p" ] || { echo "::error::缺少 package/openfi/$p"; fail=1; }
           done
-
-          # 回归测试（usbmode 的纯逻辑 / 短信 CLI 的计时）
-          [ -x tests/test-usbmode.sh ] && { sh tests/test-usbmode.sh || fail=1; }
-          [ -x tests/test-sms-cli.sh ] && { sh tests/test-sms-cli.sh || fail=1; }
+          for p in luci-app-openfi-modem luci-app-openfi-sms; do
+            [ -d "package/openfi/$p" ] && { echo "::error::package/openfi/$p 应已删除"; fail=1; }
+          done
 
           # 跨包一致性：JS 的 uci 引用 / ACL / uci-defaults 配置文件必须指向同一个配置
           [ -x scripts/openfi/check-consistency.sh ] && { sh scripts/openfi/check-consistency.sh || fail=1; }
@@ -267,7 +264,7 @@ jobs:
           echo "----- 树内包能被扫到吗 -----"
           # Makefile 里不能用 C 风格注释，否则 make 解析失败、扫描器静默跳过，
           # 最后报的是"依赖不存在"，很难查。
-          for p in openfi-lib luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+          for p in openfi-lib luci-app-openfi-fan; do
             f="package/openfi/$p/Makefile"
             [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
             grep -qE '^[[:space:]]*/\*|^[[:space:]]*\*/' "$f" \
@@ -411,7 +408,7 @@ jobs:
             && { echo "::error::initramfs 被打开了 —— 我们只发 sysupgrade，不需要它"; exit 1; } || true
           echo "OK: initramfs 已关闭"
 
-          for s in luci-app-openfi-fan luci-app-openfi-modem luci-app-openfi-sms; do
+          for s in luci-app-openfi-fan luci-app-5gmodem luci-proto-mbim modemmanager; do
             grep -q "^CONFIG_PACKAGE_${s}=y" .config \
               || { echo "::error::${s} 没进 .config"; exit 1; }
             echo "OK: ${s}=y"
