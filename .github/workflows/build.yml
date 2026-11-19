@@ -562,35 +562,35 @@ jobs:
 
           | 项目 | 值 |
           |---|---|
-          | 底座 | \`chasey-dev/immortalwrt-mt798x-rebase\` @ \`25.12\`（内核 6.12.112） |
-          | WiFi | 联发科闭源 \`mt_wifi\`（2.4G / 5G）+ WED/PPE 驱动 |
+          | 底座 | `chasey-dev/immortalwrt-mt798x-rebase` @ `25.12`（内核 6.12.112） |
+          | WiFi | 联发科闭源 `mt_wifi`（2.4G / 5G）+ WED/PPE 驱动 |
           | 加速 | turboacc 默认 **关 HNAT 快路**（把包留给 CPU 的 qdisc），BBR 开 |
-          | WAN | 5G 模组 \`RM500U-CN\`：NCM 自拨（\`usb0\` / dhcp）即可上网 |
-          | 模组面板 | \`luci-app-5gmodem\` 完整版（状态/短信/AT 终端/锁频/USSD/温度） |
-          | 风扇 | \`luci-app-openfi-fan\`（读 5gmodem 的 \`/tmp/5gmodem/tele.json\`） |
-          | 延迟控制 | \`sqm-scripts\` + CAKE 已编入，**出场关闭**；测速后填带宽再开 |
+          | WAN | 5G 模组 `RM500U-CN`：NCM 自拨（`usb0` / dhcp）即可上网 |
+          | 模组面板 | `luci-app-5gmodem` 完整版（状态/短信/AT 终端/锁频/USSD/温度） |
+          | 风扇 | `luci-app-openfi-fan`（读 5gmodem 的 `/tmp/5gmodem/tele.json`） |
+          | 延迟控制 | `sqm-scripts` + CAKE 已编入，**出场关闭**；测速后填带宽再开 |
 
           ### 刷机
 
-          \`\`\`sh
+          ```sh
           sysupgrade -n /tmp/$FWNAME
-          \`\`\`
+          ```
 
-          - 默认 LAN **\`192.168.1.1\`**，WAN 走 USB 模组
+          - 默认 LAN **`192.168.1.1`**，WAN 走 USB 模组
           - 首次登录请设置 root 密码；WiFi 默认不加密
-          - 从其它固件刷入请**不要保留配置**（\`-n\`）
+          - 从其它固件刷入请**不要保留配置**（`-n`）
 
           ### 刷完请注意
 
-          - 首次开机会自动探测模组并接管 \`wan\`，约 30~60 秒后上网；期间面板可能显示"检测中"
-          - 想用 SQM 压延迟：LuCI → 网络 → SQM QoS，接口 \`wan\`，下载/上传填实测速率的 90%
-          - 想换 MBIM（路由器侧拨号）：先在 AT 终端跑 \`AT+QCFG="usbnet",2\` 再 \`AT+CFUN=1,1\`
-          - 回退硬件加速：\`uci set turboacc.config.fastpath='mediatek_hnat'\` 并关掉 SQM
+          - 首次开机会自动探测模组并接管 `wan`，约 30~60 秒后上网；期间面板可能显示"检测中"
+          - 想用 SQM 压延迟：LuCI → 网络 → SQM QoS，接口 `wan`，下载/上传填实测速率的 90%
+          - 想换 MBIM（路由器侧拨号）：先在 AT 终端跑 `AT+QCFG="usbnet",2` 再 `AT+CFUN=1,1`
+          - 回退硬件加速：`uci set turboacc.config.fastpath='mediatek_hnat'` 并关掉 SQM
 
           ### 附件
 
-          1. \`$FWNAME\` —— 固件本体
-          2. \`$FWNAME.md5.txt\` —— 它的 MD5
+          1. `$FWNAME` —— 固件本体
+          2. `$FWNAME.md5.txt` —— 它的 MD5
           NOTES
           gh release create "$TAG" out/* \
             --title "OpenFi 6C $TAG" \
