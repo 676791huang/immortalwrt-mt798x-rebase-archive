@@ -1,257 +1,230 @@
 name: sync-upstream
 
+# ── 每天把上游 chasey-dev/immortalwrt-mt798x-rebase 的 25.12 合进来 ───────
 #
-# 自动拉取上游更新（chasey-dev/immortalwrt-mt798x-rebase）
+# 为什么不用 git merge：本仓库是"无历史快照"（根提交没有父），和上游没有共同
+# 祖先。所以用"补丁法"：
+#   ① .github/upstream-base 记着上次同步到的上游提交；
+#   ② 从上游只取 base 和新 tip 的树（blob 按需懒取，不拉 7 万条历史）；
+#   ③ git diff base tip → 上游这段时间的改动，git apply --3way 打到我们树上：
+#      和我们的改动不重叠 → 自动合；重叠 → 报冲突；
+#   ④ 成功：提交推送 main，再把 main 合进产品分支（同源，普通 merge 即可）；
+#   ⑤ 冲突：一个字节都不推，开/更新 issue，列出冲突文件和上游提交范围。
 #
-# ── 为什么单独一个工作流，不写在 build.yml 里 ─────────────────────────────
-#   build.yml 管的是"编固件"，动辄一小时；同步只是几个 git 命令、几秒钟。
-#   混在一起的话，同步失败会把构建也带挂，而且日志搅在一块不好看。
-#
-# ── 它做什么 ────────────────────────────────────────────────────────────
-#   ① 把上游分支拉下来，更新我们 fork 的同名分支（默认 25.12）
-#      · 这个分支是【纯上游】，只做快进，不掺我们的东西
-#   ② 然后开一个 PR：把 25.12 合进 openfi-6c
-#      · ★ 故意【不自动合并】。openfi-6c 上有我们的设备支持和三个包，
-#        上游改了同一片区域（比如 hnat 补丁、filogic.mk）就会冲突，
-#        这种冲突必须人看一眼再决定怎么解，自动合并很容易悄悄丢掉我们的改动。
-#      · 已经有同名的 PR 就不重复开（否则每天一个，很快一堆）。
-#
-# ── 怎么触发 ────────────────────────────────────────────────────────────
-#   · 定时：每天 UTC 20:00（北京时间凌晨 4 点，这时候没人用）
-#   · 手动：Actions → sync-upstream → Run workflow（可指定分支）
-#
-# ── 需要的权限 ──────────────────────────────────────────────────────────
-#   contents: write       推 fork 的分支
-#   pull-requests: write  开 PR
-#   用的是仓库自带的 GITHUB_TOKEN，不用额外配 secret。
-#
+# 触发：每天 UTC 20:00（北京 04:00），也可以手动跑（dry_run 只看不合）。
 
 on:
-  # ⚠️ 这个工作流是给旧的 fork 布局写的（纯上游 25.12 分支 + openfi-6c 开发分支）。
-  # 现在仓库改成「单条主线的 main（无历史快照）」之后，这里的分支名和"开 PR 合进
-  # openfi-6c"的逻辑都不成立了，定时跑只会每天挂一次。
-  # 所以先把定时摘掉，只保留手动触发；等按新布局重写回来再加回 cron：
-  #
-  #   schedule:
-  #     - cron: '0 20 * * *'   # UTC 20:00 = 北京时间 04:00
-  #
+  schedule:
+    - cron: '0 20 * * *'
   workflow_dispatch:
     inputs:
       upstream_branch:
-        description: '要同步的上游分支'
-        required: true
+        description: '上游分支'
+        required: false
         default: '25.12'
-        type: choice
-        options:
-          - '25.12'
-          - '25.12-dev-wifi7'
-          - 'openwrt-25.12'
-      base_branch:
-        description: '把我们自己的哪个分支合上去'
-        required: true
-        default: 'openfi-6c'
-        type: string
-      open_pr:
-        description: '有更新时开 PR（关掉就只更新 25.12 分支）'
-        required: true
-        default: true
+      product_branch:
+        description: '产品分支（main 合完再合进它）'
+        required: false
+        default: '5gmodem-full'
+      dry_run:
+        description: '只试不打（不提交、不推送）'
         type: boolean
+        default: false
 
 permissions:
   contents: write
-  pull-requests: write
+  issues: write
 
 concurrency:
-  # 同一时间只跑一个，避免两次同步互相打架
   group: sync-upstream
   cancel-in-progress: false
 
+env:
+  UPSTREAM_REPO: chasey-dev/immortalwrt-mt798x-rebase
+
 jobs:
   sync:
-    name: 拉取上游并开 PR
+    name: 拉上游 → 应用到 main → 合进产品分支
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
-      - name: 取出我们 fork 的 25.12 分支
+      - name: 取出 main
         uses: actions/checkout@v4
         with:
-          # 明确指到自己这个仓库（fork），而不是上游
-          repository: ${{ github.repository }}
-          ref: ${{ github.event.inputs.upstream_branch || '25.12' }}
-          # 要能往前推，所以不能只取一个提交
+          ref: main
           fetch-depth: 0
-          # GITHUB_TOKEN 默认只在当前仓库有写权限，正合适
           token: ${{ secrets.GITHUB_TOKEN }}
-          persist-credentials: true
 
-      - name: 配置 git 身份
+      - name: 初始化
         run: |
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          echo "UP_BRANCH=${{ inputs.upstream_branch || '25.12' }}" >> "$GITHUB_ENV"
+          echo "PRODUCT=${{ inputs.product_branch || '5gmodem-full' }}" >> "$GITHUB_ENV"
+          echo "DRY=${{ inputs.dry_run || 'false' }}" >> "$GITHUB_ENV"
 
-      - name: 添加上游远端并拉取
-        id: fetch
-        env:
-          UPSTREAM_BRANCH: ${{ github.event.inputs.upstream_branch || '25.12' }}
+      - name: 拉上游（只取树）
         run: |
-          set -eu
-          git remote add upstream https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git 2>/dev/null \
-            || git remote set-url upstream https://github.com/chasey-dev/immortalwrt-mt798x-rebase.git
-
-          echo "拉取上游 $UPSTREAM_BRANCH ..."
-          git fetch --no-tags upstream "$UPSTREAM_BRANCH"
-
-          BEFORE=$(git rev-parse HEAD)
-          AFTER=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
-          BEHIND=$(git rev-list --count "HEAD..upstream/$UPSTREAM_BRANCH" || echo 0)
-
-          echo "  本地 HEAD : ${BEFORE:0:10}"
-          echo "  上游 HEAD : ${AFTER:0:10}"
-          echo "  落后提交数: $BEHIND"
-
-          echo "before=$BEFORE"  >> "$GITHUB_OUTPUT"
-          echo "after=$AFTER"    >> "$GITHUB_OUTPUT"
-          echo "behind=$BEHIND"  >> "$GITHUB_OUTPUT"
-          echo "changed=$([ "$BEFORE" != "$AFTER" ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
-
-          # 上游新增了什么（只列标题，方便在日志里一眼看到）
-          if [ "$BEHIND" -gt 0 ]; then
-            echo "──── 上游新增的提交 ────"
-            git log --oneline --no-decorate "HEAD..upstream/$UPSTREAM_BRANCH" | head -40
+          set -euo pipefail
+          BASE=$(tr -d '[:space:]' < .github/upstream-base)
+          test -n "$BASE" || { echo "::error::.github/upstream-base 是空的"; exit 1; }
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git config remote.upstream.promisor true
+          git config remote.upstream.partialclonefilter blob:none
+          fetch_retry() {
+            for i in 1 2 3; do
+              git "$@" && return 0
+              echo "第 $i 次 fetch 失败，5 秒后重试" >&2
+              sleep 5
+            done
+            return 1
+          }
+          # 只取"上次同步的提交"和"当前 tip"这两棵树，不拉上游 7 万条历史。
+          # 拿不到 base（网络/服务端限制）就退回取整条分支（仍然不带 blob）。
+          if ! fetch_retry fetch --no-tags --depth=1 --filter=blob:none upstream "$BASE"; then
+            echo "::warning::按 SHA 取 base 失败，改取完整分支头"
+            fetch_retry fetch --no-tags --filter=blob:none upstream \
+              "+refs/heads/${UP_BRANCH}:refs/remotes/upstream/${UP_BRANCH}" \
+              || { echo "::error::拉取上游失败（网络或权限）"; exit 1; }
           fi
+          fetch_retry fetch --no-tags --depth=1 --filter=blob:none upstream \
+            "+refs/heads/${UP_BRANCH}:refs/remotes/upstream/${UP_BRANCH}" \
+            || { echo "::error::拉取上游分支失败"; exit 1; }
+          NEW=$(git rev-parse "refs/remotes/upstream/${UP_BRANCH}^{commit}")
+          {
+            echo "BASE=$BASE"
+            echo "NEW=$NEW"
+          } >> "$GITHUB_ENV"
+          echo "上次同步: $BASE"
+          echo "上游最新: $NEW"
 
-      - name: 快进我们 fork 的分支
-        id: push
-        if: steps.fetch.outputs.changed == '1'
-        env:
-          UPSTREAM_BRANCH: ${{ github.event.inputs.upstream_branch || '25.12' }}
+      - name: 判断是否有更新
+        id: up
         run: |
-          set -eu
-          # 这个分支是纯上游镜像，理论上永远能快进。
-          # 万一不能（有人往这个分支上直接提交过），就明确报错，
-          # 不要用 merge 硬合 —— 那样两边就悄悄分叉了。
-          AFTER=$(git rev-parse "upstream/$UPSTREAM_BRANCH")
-
-          if git merge-base --is-ancestor HEAD "upstream/$UPSTREAM_BRANCH"; then
-            git merge --ff-only "upstream/$UPSTREAM_BRANCH"
-            git push origin "HEAD:$UPSTREAM_BRANCH"
-            echo "pushed=1" >> "$GITHUB_OUTPUT"
-            echo "✅ 已把 $UPSTREAM_BRANCH 快进到 $AFTER"
+          if [ "$BASE" = "$NEW" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "上游没有新提交，收工"
           else
-            echo "::error::$UPSTREAM_BRANCH 无法快进 —— 这个分支本应是纯上游镜像，"
-            echo "::error::但有人往上面提交过。请人工确认后再同步。"
-            exit 1
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "上游有新提交，开始合"
           fi
 
-      - name: 检查 25.12 是否已经合进目标分支
-        id: check
-        if: steps.push.outputs.pushed == '1'
-        env:
-          BASE_BRANCH: ${{ github.event.inputs.base_branch || 'openfi-6c' }}
+      - name: 生成补丁并 3-way 应用
+        if: steps.up.outputs.changed == 'true'
+        id: apply
         run: |
-          set -eu
-          git fetch --no-tags origin "$BASE_BRANCH"
-          AHEAD=$(git rev-list --count "origin/$BASE_BRANCH..HEAD" || echo 0)
-          echo "目标分支落后 $AHEAD 个提交"
-          echo "ahead=$AHEAD" >> "$GITHUB_OUTPUT"
-          echo "need_pr=$([ "$AHEAD" -gt 0 ] && echo 1 || echo 0)" >> "$GITHUB_OUTPUT"
+          set -uo pipefail
+          if ! git diff --binary "$BASE" "$NEW" > /tmp/upstream.patch; then
+            echo "::error::生成上游补丁失败"; exit 1
+          fi
+          FILES=$(grep -c '^diff --git' /tmp/upstream.patch || true)
+          echo "补丁 $(wc -c < /tmp/upstream.patch) 字节，涉及 ${FILES:-0} 个文件"
+          if git apply --3way --index /tmp/upstream.patch; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "✅ 干净地应用了上游改动"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            git ls-files -u | awk '{print $4}' | sort -u > /tmp/conflicts.txt || true
+            echo "❌ 有冲突：$(wc -l < /tmp/conflicts.txt) 个文件"
+            head -40 /tmp/conflicts.txt || true
+            git reset --hard HEAD >/dev/null 2>&1
+            git clean -fdq
+          fi
 
-      - name: 开 PR（把 25.12 合进我们的分支）
-        id: pr
-        if: |
-          steps.check.outputs.need_pr == '1' &&
-          (github.event_name != 'workflow_dispatch' || github.event.inputs.open_pr != 'false')
+      - name: 冲突 → 开 issue 并停下
+        if: steps.up.outputs.changed == 'true' && steps.apply.outputs.ok == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          UPSTREAM_BRANCH: ${{ github.event.inputs.upstream_branch || '25.12' }}
-          BASE_BRANCH: ${{ github.event.inputs.base_branch || 'openfi-6c' }}
         run: |
-          set -eu
-          HEAD_BRANCH="$UPSTREAM_BRANCH"
-
-          # ★ 已经有同 head/base 的 PR 就不重复开。
-          #   每天开一个的话，一周就十几条，真正要看的反而找不到。
-          EXIST=$(gh pr list --repo "$GITHUB_REPOSITORY" \
-                    --base "$BASE_BRANCH" --head "$HEAD_BRANCH" \
-                    --state open --json number --jq '.[0].number // empty')
-
-          if [ -n "$EXIST" ]; then
-            echo "已有 PR #$EXIST，不再新建"
-            echo "url=$(gh pr view "$EXIST" --repo "$GITHUB_REPOSITORY" --json url --jq .url)" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          COUNT=${{ steps.check.outputs.ahead }}
-          BODY=$(cat <<EOF
-          自动同步：把上游 \`$UPSTREAM_BRANCH\` 合进 \`$BASE_BRANCH\`。
-
-          这次共 **$COUNT** 个新提交。上游新增的内容：
-
-          \`\`\`
-          $(git log --oneline --no-decorate "origin/$BASE_BRANCH..HEAD" | head -60)
-          \`\`\`
-
-          ---
-
-          ### 合并前请确认
-
-          - [ ] 上游有没有动到我们的设备支持
-                （\`target/linux/mediatek/dts/mt7981b-openfi-6c.dts\`、
-                 \`target/linux/mediatek/image/filogic.mk\`、
-                 \`target/linux/mediatek/filogic/base-files/etc/board.d/02_network\`）
-          - [ ] 上游有没有动到 \`package/openfi/\` 依赖的东西
-          - [ ] 上游有没有动到 HNAT / 内核补丁（\`patches-6.12/\`）
-          - [ ] 冲突解完以后，本地的板级自检要过：
-                \`sh tests/test-usbmode.sh\`、\`sh scripts/openfi/check-musl.sh\`
-
-          > 这个 PR 是**故意不自动合并**的：openfi-6c 上有我们的设备支持和三个包，
-          > 上游改了同一片区域就会冲突。自动合并很容易把我们的改动悄悄冲掉。
-          EOF
-          )
-
-          # ★ 开 PR 需要仓库开启 "Allow GitHub Actions to create and approve pull requests"。
-          #   默认是【关】的,直接调 gh pr create 会报:
-          #     GraphQL: GitHub Actions is not permitted to create or approve pull requests
-          #   那一步整个失败,把前面已经成功的同步也带成红灯 —— 没必要。
-          #   所以这里【降级】:先试 PR,不行就推一个待合并分支,
-          #   人在网页上点两下就能开 PR。
-          if gh pr create --repo "$GITHUB_REPOSITORY" \
-               --base "$BASE_BRANCH" --head "$HEAD_BRANCH" \
-               --title "同步上游 $UPSTREAM_BRANCH → $BASE_BRANCH（$COUNT 个提交）" \
-               --body "$BODY" 2>/tmp/pr.err; then
-            URL=$(gh pr list --repo "$GITHUB_REPOSITORY" \
-                    --base "$BASE_BRANCH" --head "$HEAD_BRANCH" \
-                    --state open --json url --jq '.[0].url')
-            echo "url=$URL" >> "$GITHUB_OUTPUT"
-            echo "✅ PR: $URL"
+          set -uo pipefail
+          RANGE="https://github.com/${UPSTREAM_REPO}/compare/${BASE:0:10}...${NEW:0:10}"
+          {
+            echo "每天自动同步上游时，**${BASE:0:10}..${NEW:0:10}** 这段和我们的改动冲突了。"
+            echo
+            echo "- 上游范围：$RANGE"
+            echo "- 冲突文件（最多 40 个）："
+            echo '```'
+            head -40 /tmp/conflicts.txt 2>/dev/null || echo "(没能列出)"
+            echo '```'
+            echo
+            echo "**这次什么都没推**（main 和 \`$PRODUCT\` 都保持原样）。处理办法："
+            echo
+            echo '```sh'
+            echo "git fetch https://github.com/${UPSTREAM_REPO}.git ${UP_BRANCH}"
+            echo "git diff --binary ${BASE:0:10} FETCH_HEAD > /tmp/up.patch"
+            echo "git apply --3way /tmp/up.patch   # 手工解冲突"
+            echo "git commit -am 'sync-upstream: 手工解决冲突'"
+            echo "echo ${NEW} > .github/upstream-base"
+            echo "git commit -am 'sync-upstream: 更新基点'"
+            echo '```'
+            echo
+            echo "然后 Actions → sync-upstream → Run workflow 再跑一次（这次会当成已同步）。"
+          } > /tmp/issue.md
+          TITLE="上游同步冲突"
+          NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                  --json number,title --jq '.[] | select(.title|startswith("上游同步冲突")) | .number' \
+                  | head -1)
+          if [ -n "${NUM:-}" ]; then
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body-file /tmp/issue.md
+            echo "已在 issue #$NUM 追加评论"
           else
-            echo "::warning::建不了 PR（仓库未开启 Actions 创建 PR 的权限）"
-            sed 's/^/    /' /tmp/pr.err || true
-
-            SYNC_BRANCH="sync/$UPSTREAM_BRANCH-into-$BASE_BRANCH"
-            git push --force origin "HEAD:refs/heads/$SYNC_BRANCH"
-            echo ""
-            echo "改为推送一个待合并分支:$SYNC_BRANCH"
-            echo "点这里开 PR:"
-            echo "  https://github.com/$GITHUB_REPOSITORY/compare/$BASE_BRANCH...$SYNC_BRANCH?expand=1"
-            echo "url=https://github.com/$GITHUB_REPOSITORY/compare/$BASE_BRANCH...$SYNC_BRANCH?expand=1" >> "$GITHUB_OUTPUT"
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file /tmp/issue.md
           fi
+          exit 1
 
-          # ★ 无论如何都不要让这一步失败:
-          #   同步本身已经成功了(25.12 分支已经更新),PR 只是"通知手段",
-          #   它的权限问题不该把整个工作流标红。
-          exit 0
-
-      - name: 汇总
-        if: always()
+      - name: 提交并推送 main
+        if: steps.apply.outputs.ok == 'true' && inputs.dry_run != true
         run: |
-          echo "======== 同步结果 ========"
-          echo "上游分支    : ${{ github.event.inputs.upstream_branch || '25.12' }}"
-          echo "上游提交    : ${{ steps.fetch.outputs.after }}"
-          echo "本地原来    : ${{ steps.fetch.outputs.before }}"
-          echo "落后提交数  : ${{ steps.fetch.outputs.behind }}"
-          echo "有更新      : ${{ steps.fetch.outputs.changed == '1' && '是' || '否' }}"
-          echo "已推送到fork: ${{ steps.push.outputs.pushed == '1' && '是' || '否' }}"
-          echo "目标分支落后: ${{ steps.check.outputs.ahead || '—' }}"
-          echo "PR          : ${{ steps.pr.outputs.url || '（没有新建，或已存在）' }}"
+          set -euo pipefail
+          echo "$NEW" > .github/upstream-base
+          git add -A
+          git commit -m "sync-upstream: 上游 ${UP_BRANCH} ${BASE:0:10}..${NEW:0:10} [skip ci]"
+          git push origin HEAD:main
+
+      - name: 合并 main → 产品分支
+        if: steps.apply.outputs.ok == 'true' && inputs.dry_run != true
+        id: prod
+        run: |
+          set -uo pipefail
+          if ! git fetch origin "$PRODUCT" >/dev/null 2>&1; then
+            echo "产品分支 $PRODUCT 不存在，跳过"; exit 0
+          fi
+          git checkout -B "$PRODUCT" "origin/$PRODUCT"
+          if git merge --no-ff --no-edit -m "merge main → $PRODUCT（上游同步）[skip ci]" main; then
+            git push origin HEAD:"$PRODUCT"
+            echo "✅ $PRODUCT 已跟上 main"
+          else
+            git ls-files -u | awk '{print $4}' | sort -u > /tmp/pconf.txt || true
+            git merge --abort || true
+            {
+              echo "main 同步上游成功，但合进 \`$PRODUCT\` 时冲突了。"
+              echo
+              echo '```'
+              head -40 /tmp/pconf.txt 2>/dev/null || echo "(没能列出)"
+              echo '```'
+              echo
+              echo "main 已经推上去了；产品分支需要人工合一次："
+              echo '```sh'
+              echo "git fetch origin && git checkout $PRODUCT && git merge origin/main"
+              echo '```'
+            } > /tmp/pissue.md
+            NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                    --json number,title --jq '.[] | select(.title|startswith("产品分支合并冲突")) | .number' \
+                    | head -1)
+            if [ -n "${NUM:-}" ]; then
+              gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pissue.md
+            else
+              gh issue create --repo "$GITHUB_REPOSITORY" --title "产品分支合并冲突" --body-file /tmp/pissue.md
+            fi
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 干跑收尾
+        if: steps.apply.outputs.ok == 'true' && inputs.dry_run == true
+        run: |
+          echo "dry_run：上游 ${BASE:0:10}..${NEW:0:10} 能干净应用，没有提交。"
+          git status --short | head -20
